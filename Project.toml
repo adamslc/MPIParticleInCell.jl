@@ -1,0 +1,13 @@
+name = "MPIParticleInCell"
+uuid = "9ce4ebf3-bc69-4d54-a62a-99ca13ce92ee"
+authors = ["Luke Adams <luke@lukeclydeadams.com> and contributors"]
+version = "0.1.0"
+
+[compat]
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
