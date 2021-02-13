@@ -1,3 +1,12 @@
+"""
+    Field(grid, name, data_type, full_field_on_root)
+
+Creates a distributed array of type `data_type` with dimensions specified by
+`grid`. If `full_field_on_root` is true, then the root node allocates memory
+the entire array, although in normal operation it only utilizes the portion of
+memory that it is assigned to update. Obviously, care must be taken to not use
+this option for large simulations.
+"""
 struct Field{ET, G, N}
     field_name::String
     field_values::Array{ET, N}
@@ -34,6 +43,11 @@ function Base.getindex(f::Field{ET, G, N}, indices...) where {ET, G, N}
     return getindex(f.field_values, (indices .+ f.grid.num_guard_cells)...)
 end
 
+"""
+    communicate_halo!(f::Field, comm)
+
+Communicates the values of each processors guard cells to its neighbors.
+"""
 function communicate_halo!(f::Field, comm)
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
@@ -42,14 +56,14 @@ function communicate_halo!(f::Field, comm)
     ngc = f.grid.num_guard_cells
     nc  = f.grid.num_cells
 
-    indices = compute_proc_indices(f.grid.num_cuts, rank)
+    indices = compute_proc_indices(f.grid.proc_dims, rank)
     onetos = map(Base.OneTo, nc .+ (2*ngc + 1))
 
     for (i, index) in enumerate(indices)
         lower_indices = tuple(indices[1:i-1]..., indices[i] - 1, indices[i+1:end]...)
-        lower_proc_rank = compute_proc_rank(f.grid.num_cuts, lower_indices)
+        lower_proc_rank = compute_proc_rank(f.grid.proc_dims, lower_indices)
         upper_indices = tuple(indices[1:i-1]..., indices[i] + 1, indices[i+1:end]...)
-        upper_proc_rank = compute_proc_rank(f.grid.num_cuts, upper_indices)
+        upper_proc_rank = compute_proc_rank(f.grid.proc_dims, upper_indices)
 
         sendrange1 = tuple(onetos[1:i-1]..., ngc + 1:2*ngc + 1,                 onetos[i+1:end]...)
         recvrange1 = tuple(onetos[1:i-1]..., ngc + nc[i] + 1:nc[i] + 2*ngc + 1, onetos[i+1:end]...)
@@ -72,15 +86,22 @@ function communicate_halo!(f::Field, comm)
         rview2 .= data2
     end
 end
+"""
+    gather_field_on_root!(f::Field)
 
+Gathers the entire field `f` on the root node. Can only be used if `f` was created
+with `full_field_on_root = true`.
+"""
 function gather_field_on_root!(f::Field)
+    @assert f.full_field_on_root == true
+
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
     size = MPI.Comm_size(comm)
 
     if rank == 0
         for proc in 1:size-1
-            lbs, ubs = compute_proc_bounds(f.grid.global_num_cells, f.grid.num_cuts, proc)
+            lbs, ubs = compute_proc_bounds(f.grid.global_num_cells, f.grid.proc_dims, proc)
             data, stat = MPI.recv(proc, 1, comm)
             indices = map((lb, ub) -> lb + f.grid.num_guard_cells:ub + f.grid.num_guard_cells, lbs, ubs)
             view(f.field_values, indices...) .= data

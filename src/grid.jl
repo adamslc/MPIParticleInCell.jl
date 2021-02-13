@@ -29,7 +29,7 @@ struct UniformGrid{N, FT, IT} <: AbstractGrid
     cell_size::NTuple{N, FT}
 
     periodic::NTuple{N, Bool}
-    num_cuts::NTuple{N, IT}
+    proc_dims::NTuple{N, IT}
 end
 
 function UniformGrid(global_lower_dimensions::NTuple{N, FT},
@@ -39,7 +39,7 @@ function UniformGrid(global_lower_dimensions::NTuple{N, FT},
               periodic::NTuple{N, Bool}=ntuple(_ -> true, N),
              ) where {N, FT, IT}
 
-    num_cuts = Tuple(compute_decomposition_cuts(global_num_cells,
+    proc_dims = Tuple(compute_processor_dimensions(global_num_cells,
                                                 MPI.Comm_size(MPI.COMM_WORLD)))
 
     lower_cell_bound, upper_cell_bound =
@@ -70,7 +70,7 @@ function UniformGrid(global_lower_dimensions::NTuple{N, FT},
                            cell_size,
 
                            periodic,
-                           num_cuts
+                           proc_dims
                           )
 end
 
@@ -93,67 +93,82 @@ function Base.show(io::IO, g::UniformGrid{N, FT, IT}) where {N, FT, IT}
 end
 
 """
-    compute_decomposition_cuts(num_cells::NTuple{N}, num_procs)
+    compute_processor_dimensions(num_cells::NTuple{N}, num_procs)
 
 Given the desired number of cells in each dimension, and a number of processors,
 returns the number of subdivisions along each dimension that minimize the amount
 of inter-rank communication.
 """
-function compute_decomposition_cuts(num_cells::NTuple{N}, num_procs) where N
+function compute_processor_dimensions(num_cells::NTuple{N}, num_procs) where N
     factors = factor(Vector, num_procs)
 
-    num_cuts = fill(1, N)
+    proc_dims = fill(1, N)
 
     # For each prime factor of num_procs, we cut the simulation domain in the
     # dimension with the most cells remaining.
     for factor in Iterators.reverse(factors)
         # Find the current largest dimension
-        largest_value = num_cells[1] / num_cuts[1]
+        largest_value = num_cells[1] / proc_dims[1]
         largest_index = 1
         for j in 2:N
-            if num_cells[j] / num_cuts[j] > largest_value
-                largest_value = num_cells[j] / num_cuts[j]
+            if num_cells[j] / proc_dims[j] > largest_value
+                largest_value = num_cells[j] / proc_dims[j]
                 largest_index = j
             end
         end
 
         # Cut along that dimension to make it smaller
-        num_cuts[largest_index] *= factor
+        proc_dims[largest_index] *= factor
     end
 
     # We should have make exactly num_procs subdomains
-    @assert reduce(*, num_cuts) == num_procs
+    @assert reduce(*, proc_dims) == num_procs
 
-    return num_cuts
+    return proc_dims
 end
 
-function compute_proc_indices(num_cuts, proc)
-    indices = Vector{Int}(undef, length(num_cuts))
+"""
+    compute_proc_indices(proc_dims, proc)
+
+Computes the unique indices in the processor grid for `proc`.
+"""
+function compute_proc_indices(proc_dims, proc)
+    indices = Vector{Int}(undef, length(proc_dims))
     factor = 1
     sum = 0
-    for i in 1:length(num_cuts)
-        indices[i] = div(mod(proc - sum, factor * num_cuts[i]), factor)
-        factor *= num_cuts[i]
+    for i in 1:length(proc_dims)
+        indices[i] = div(mod(proc - sum, factor * proc_dims[i]), factor)
+        factor *= proc_dims[i]
         sum += indices[i]
     end
     return Tuple(indices)
 end
 
-function compute_proc_rank(num_cuts, indices)
+"""
+    compute_proc_rank(proc_dims, indices)
+
+Computes the rank associated with the processor at `indices`.
+"""
+function compute_proc_rank(proc_dims, indices)
     rank = 0
     prod = 1
     for i in 1:length(indices)
-        rank += prod * mod(indices[i], num_cuts[i])
-        prod *= num_cuts[i]
+        rank += prod * mod(indices[i], proc_dims[i])
+        prod *= proc_dims[i]
     end
     return rank
 end
 
-function compute_proc_bounds(num_cells, num_cuts, proc)
-    indices = compute_proc_indices(num_cuts, proc)
+"""
+    compute_proc_bounds(num_cells, proc_dims, proc)
 
-    num_subcells = Tuple(div.(num_cells, num_cuts))
-    extra_cells  = Tuple(mod.(num_cells, num_cuts))
+Computes the range of cells that `proc` is responsible for.
+"""
+function compute_proc_bounds(num_cells, proc_dims, proc)
+    indices = compute_proc_indices(proc_dims, proc)
+
+    num_subcells = Tuple(div.(num_cells, proc_dims))
+    extra_cells  = Tuple(mod.(num_cells, proc_dims))
 
     lower_bound = num_subcells .* indices .+ 1 .+
         ifelse.(indices .< extra_cells, indices, extra_cells)
@@ -175,20 +190,20 @@ vectors of the lower and upper bounds for each processor.
 NOTE: `proc` is zero indexed.
 """
 function decompose_domain(num_cells::NTuple{N}, num_procs) where N
-    num_cuts = compute_decomposition_cuts(num_cells, num_procs)
+    proc_dims = compute_processor_dimensions(num_cells, num_procs)
 
     lower_bounds = Vector{typeof(num_cells)}(undef, num_procs)
     upper_bounds = Vector{typeof(num_cells)}(undef, num_procs)
 
     for i in 1:num_procs
-        lower_bounds[i], upper_bounds[i] = compute_proc_bounds(num_cells, num_cuts, i - 1)
+        lower_bounds[i], upper_bounds[i] = compute_proc_bounds(num_cells, proc_dims, i - 1)
     end
 
     return lower_bounds, upper_bounds
 end
 
 function decompose_domain(num_cells::NTuple{N}, num_procs, proc) where N
-    num_cuts = compute_decomposition_cuts(num_cells, num_procs)
+    proc_dims = compute_processor_dimensions(num_cells, num_procs)
 
-    return compute_proc_bounds(num_cells, num_cuts, proc)
+    return compute_proc_bounds(num_cells, proc_dims, proc)
 end
